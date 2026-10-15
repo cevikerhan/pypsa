@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, useEffect, useMemo, useState } from 'react';
 import {
   AppBar,
   Box,
@@ -30,10 +30,10 @@ import DashboardRoundedIcon from '@mui/icons-material/DashboardRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
-import AutoAwesomeMotionRoundedIcon from '@mui/icons-material/AutoAwesomeMotionRounded';
+import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
-type TabKey = 'overview' | 'network' | 'optimization' | 'results';
+type TabKey = 'overview' | 'network' | 'scenarios' | 'results';
 
 type SystemInfo = {
   name: string;
@@ -41,9 +41,11 @@ type SystemInfo = {
   pypsa_version: string;
   features: string[];
   modes: string[];
+  solvers: string[];
 };
 
-type NetworkPreview = {
+type NetworkSummary = {
+  id: string;
   name: string;
   buses: number;
   lines: number;
@@ -56,17 +58,20 @@ type NetworkPreview = {
   supply: number;
   demand: number;
   status: string;
+  scenario_name: string;
 };
 
-type ComponentSummary = {
+type ExampleNetwork = {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+  description: string;
+};
+
+type ComponentMeta = {
   name: string;
   count: number;
-  status: string;
-};
-
-type OperationAction = {
-  id: string;
-  label: string;
   status: string;
 };
 
@@ -74,6 +79,9 @@ type RunResult = {
   status: string;
   mode: string;
   network: string;
+  scenario_name: string;
+  solver: string;
+  horizon: number;
   objective: number;
   buses: number;
   lines: number;
@@ -100,47 +108,72 @@ async function fetchJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+const navItems = [
+  { key: 'overview', label: 'Overview', icon: <DashboardRoundedIcon /> },
+  { key: 'network', label: 'Network', icon: <SettingsRoundedIcon /> },
+  { key: 'scenarios', label: 'Scenarios', icon: <BoltRoundedIcon /> },
+  { key: 'results', label: 'Results', icon: <InsightsRoundedIcon /> },
+] as const;
+
 export default function App() {
   const [tab, setTab] = useState<TabKey>('overview');
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
-  const [preview, setPreview] = useState<NetworkPreview | null>(null);
-  const [components, setComponents] = useState<ComponentSummary[]>([]);
-  const [operations, setOperations] = useState<OperationAction[]>([]);
+  const [networks, setNetworks] = useState<ExampleNetwork[]>([]);
+  const [selectedNetwork, setSelectedNetwork] = useState('ac_dc_meshed');
+  const [summary, setSummary] = useState<NetworkSummary | null>(null);
+  const [components, setComponents] = useState<ComponentMeta[]>([]);
   const [result, setResult] = useState<RunResult | null>(null);
   const [running, setRunning] = useState(false);
-  const [selectedMode, setSelectedMode] = useState('lopf');
-  const [networkName, setNetworkName] = useState('ac_dc_meshed');
+  const [mode, setMode] = useState('lopf');
+  const [solver, setSolver] = useState('highs');
+  const [horizon, setHorizon] = useState(24);
+  const [scenarioName, setScenarioName] = useState('Baseline scenario');
+  const [uploadName, setUploadName] = useState('');
+
+  const loadData = async () => {
+    try {
+      const [info, exampleData, componentData] = await Promise.all([
+        fetchJson<SystemInfo>('/api/system-info'),
+        fetchJson<{ networks: ExampleNetwork[] }>('/api/example-networks'),
+        fetchJson<{ summary: ComponentMeta[] }>('/api/component-summary'),
+      ]);
+
+      setSystemInfo(info);
+      setNetworks(exampleData.networks);
+      setComponents(componentData.summary);
+      const networkSummary = await fetchJson<NetworkSummary>(`/api/network-summary?network=${selectedNetwork}`);
+      setSummary(networkSummary);
+    } catch (error) {
+      console.error('Failed to load PyPSA Studio data', error);
+    }
+  };
 
   useEffect(() => {
-    const load = async () => {
+    void loadData();
+  }, []);
+
+  useEffect(() => {
+    const loadSelectedNetwork = async () => {
       try {
-        const [info, network, componentData, operationData] = await Promise.all([
-          fetchJson<SystemInfo>('/api/system-info'),
-          fetchJson<NetworkPreview>('/api/network-preview'),
-          fetchJson<{ summary: ComponentSummary[] }>('/api/component-summary'),
-          fetchJson<{ actions: OperationAction[] }>('/api/operations'),
-        ]);
-        setSystemInfo(info);
-        setPreview(network);
-        setComponents(componentData.summary);
-        setOperations(operationData.actions);
+        const networkSummary = await fetchJson<NetworkSummary>(`/api/network-summary?network=${selectedNetwork}`);
+        setSummary(networkSummary);
       } catch (error) {
-        console.error('Failed to load PyPSA Studio data', error);
+        console.error('Failed to load selected network', error);
       }
     };
 
-    void load();
-  }, []);
+    void loadSelectedNetwork();
+  }, [selectedNetwork]);
 
-  const scenarioChart = useMemo(
+  const chartData = useMemo(
     () => [
-      { name: 'Buses', value: preview?.buses ?? 0 },
-      { name: 'Lines', value: preview?.lines ?? 0 },
-      { name: 'Generators', value: preview?.generators ?? 0 },
-      { name: 'Loads', value: preview?.loads ?? 0 },
-      { name: 'Storage', value: preview?.storage_units ?? 0 },
+      { name: 'Buses', value: summary?.buses ?? 0 },
+      { name: 'Lines', value: summary?.lines ?? 0 },
+      { name: 'Generators', value: summary?.generators ?? 0 },
+      { name: 'Loads', value: summary?.loads ?? 0 },
+      { name: 'Storage', value: summary?.storage_units ?? 0 },
     ],
-    [preview],
+    [summary],
   );
 
   const runScenario = async () => {
@@ -149,56 +182,66 @@ export default function App() {
       const response = await fetch(`${API_BASE}/api/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ network_name: networkName, mode: selectedMode }),
+        body: JSON.stringify({
+          network_name: selectedNetwork,
+          mode,
+          solver,
+          horizon,
+          scenario_name: scenarioName || 'Baseline scenario',
+        }),
       });
 
       if (!response.ok) {
-        throw new Error(`Optimization request failed: ${response.status}`);
+        throw new Error(`Optimization failed: ${response.status}`);
       }
 
       const payload = (await response.json()) as RunResult;
       setResult(payload);
       setTab('results');
     } catch (error) {
-      console.error('Failed to run scenario', error);
+      console.error('Scenario failed', error);
     } finally {
       setRunning(false);
     }
   };
 
-  const navItems = [
-    { key: 'overview', label: 'Overview', icon: <DashboardRoundedIcon /> },
-    { key: 'network', label: 'Network', icon: <AutoAwesomeMotionRoundedIcon /> },
-    { key: 'optimization', label: 'Optimization', icon: <BoltRoundedIcon /> },
-    { key: 'results', label: 'Results', icon: <InsightsRoundedIcon /> },
-  ] as const;
+  const handleUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setUploadName(file.name);
+      setScenarioName(file.name.replace(/\.[^/.]+$/, ''));
+      setSelectedNetwork('ac_dc_meshed');
+    }
+  };
+
+  const exportResults = async () => {
+    if (!result) return;
+    try {
+      await fetch(`${API_BASE}/api/export-results`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(result),
+      });
+    } catch (error) {
+      console.error('Export failed', error);
+    }
+  };
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: '#07111f', color: '#f8fafc' }}>
-      <AppBar
-        position="sticky"
-        sx={{
-          bgcolor: 'rgba(15, 23, 42, 0.92)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(125, 211, 252, 0.14)',
-        }}
-      >
+      <AppBar position="sticky" sx={{ bgcolor: 'rgba(15,23,42,0.92)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(125,211,252,0.14)' }}>
         <Toolbar>
           <BoltRoundedIcon sx={{ mr: 1.5, color: '#7dd3fc' }} />
           <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 800 }}>
             PyPSA Studio
           </Typography>
-          <Chip
-            label={systemInfo ? `PyPSA ${systemInfo.pypsa_version}` : 'Loading…'}
-            color="primary"
-            variant="outlined"
-          />
+          <Chip label={systemInfo ? `PyPSA ${systemInfo.pypsa_version}` : 'Loading…'} color="primary" variant="outlined" />
         </Toolbar>
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 4 }}>
         <Grid container spacing={3}>
-          <Grid item xs={12} md={2.3}>
+          <Grid item xs={12} md={2.4}>
             <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
               <Stack spacing={1.25}>
                 {navItems.map(({ key, label, icon }) => (
@@ -208,27 +251,27 @@ export default function App() {
                     variant={tab === key ? 'contained' : 'text'}
                     startIcon={icon}
                     onClick={() => setTab(key)}
-                    sx={{
-                      justifyContent: 'flex-start',
-                      color: tab === key ? '#06131d' : '#dbeafe',
-                      fontWeight: 700,
-                      py: 1.1,
-                    }}
+                    sx={{ justifyContent: 'flex-start', color: tab === key ? '#06131d' : '#dbeafe', fontWeight: 700, py: 1.1 }}
                   >
                     {label}
                   </Button>
                 ))}
               </Stack>
-              <Divider sx={{ my: 2, borderColor: 'rgba(148,163,184,0.22)' }} />
-              <Stack spacing={1}>
-                <Typography variant="overline" color="text.secondary">Workspace</Typography>
-                <Chip label={preview?.status ?? 'Loading'} color="success" variant="outlined" />
-                <Chip label={networkName} variant="outlined" color="secondary" />
+
+              <Divider sx={{ my: 2, borderColor: 'rgba(148,163,184,0.2)' }} />
+
+              <Stack spacing={1.5}>
+                <Typography variant="overline" color="text.secondary">Upload</Typography>
+                <Button component="label" variant="contained" color="secondary" startIcon={<UploadFileRoundedIcon />} fullWidth>
+                  Import network
+                  <input hidden type="file" accept=".nc,.h5,.hdf5,.json,.csv" onChange={handleUpload} />
+                </Button>
+                {uploadName && <Chip label={uploadName} variant="outlined" />}
               </Stack>
             </Paper>
           </Grid>
 
-          <Grid item xs={12} md={9.7}>
+          <Grid item xs={12} md={9.6}>
             <Stack spacing={3}>
               {tab === 'overview' && (
                 <>
@@ -237,8 +280,8 @@ export default function App() {
                       <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                         <CardContent>
                           <Typography variant="overline" color="text.secondary">Network</Typography>
-                          <Typography variant="h4">{preview?.name ?? 'Loading'}</Typography>
-                          <Typography variant="body2" color="text.secondary">pypsa example model</Typography>
+                          <Typography variant="h4">{summary?.name ?? 'Loading'}</Typography>
+                          <Typography variant="body2" color="text.secondary">Live selected model</Typography>
                         </CardContent>
                       </Card>
                     </Grid>
@@ -246,8 +289,8 @@ export default function App() {
                       <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                         <CardContent>
                           <Typography variant="overline" color="text.secondary">Buses</Typography>
-                          <Typography variant="h4">{preview?.buses ?? 0}</Typography>
-                          <Typography variant="body2" color="text.secondary">Active nodes in system</Typography>
+                          <Typography variant="h4">{summary?.buses ?? 0}</Typography>
+                          <Typography variant="body2" color="text.secondary">Network nodes</Typography>
                         </CardContent>
                       </Card>
                     </Grid>
@@ -255,7 +298,7 @@ export default function App() {
                       <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                         <CardContent>
                           <Typography variant="overline" color="text.secondary">Demand</Typography>
-                          <Typography variant="h4">{preview?.demand.toFixed(2) ?? '0.00'}</Typography>
+                          <Typography variant="h4">{summary?.demand.toFixed(2) ?? '0.00'}</Typography>
                           <Typography variant="body2" color="text.secondary">Load demand (MW)</Typography>
                         </CardContent>
                       </Card>
@@ -264,7 +307,7 @@ export default function App() {
                       <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                         <CardContent>
                           <Typography variant="overline" color="text.secondary">Snapshots</Typography>
-                          <Typography variant="h4">{preview?.snapshots ?? 0}</Typography>
+                          <Typography variant="h4">{summary?.snapshots ?? 0}</Typography>
                           <Typography variant="body2" color="text.secondary">Time horizon</Typography>
                         </CardContent>
                       </Card>
@@ -275,10 +318,10 @@ export default function App() {
                     <Grid item xs={12} lg={7}>
                       <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                         <Typography variant="h6" sx={{ mb: 2 }}>System composition</Typography>
-                        <Box sx={{ width: '100%', height: 280 }}>
+                        <Box sx={{ width: '100%', height: 290 }}>
                           <ResponsiveContainer>
-                            <BarChart data={scenarioChart}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                            <BarChart data={chartData}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
                               <XAxis dataKey="name" stroke="#cbd5e1" />
                               <YAxis stroke="#cbd5e1" />
                               <Tooltip />
@@ -291,15 +334,10 @@ export default function App() {
 
                     <Grid item xs={12} lg={5}>
                       <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                        <Typography variant="h6" sx={{ mb: 2 }}>Available features</Typography>
+                        <Typography variant="h6" sx={{ mb: 2 }}>Core capabilities</Typography>
                         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                           {systemInfo?.features.map((feature) => (
-                            <Chip
-                              key={feature}
-                              label={feature}
-                              variant="outlined"
-                              sx={{ borderColor: 'rgba(125,211,252,0.2)', color: '#dbeafe' }}
-                            />
+                            <Chip key={feature} label={feature} variant="outlined" sx={{ borderColor: 'rgba(125,211,252,0.2)', color: '#dbeafe' }} />
                           ))}
                         </Stack>
                       </Paper>
@@ -312,37 +350,33 @@ export default function App() {
                 <Grid container spacing={3}>
                   <Grid item xs={12} lg={8}>
                     <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                      <Typography variant="h6" sx={{ mb: 2 }}>Component overview</Typography>
-                      <TableContainer>
-                        <Table>
-                          <TableHead>
-                            <TableRow>
-                              <TableCell>Component</TableCell>
-                              <TableCell align="right">Count</TableCell>
-                              <TableCell align="right">Status</TableCell>
-                            </TableRow>
-                          </TableHead>
-                          <TableBody>
-                            {components.map((row) => (
-                              <TableRow key={row.name}>
-                                <TableCell>{row.name}</TableCell>
-                                <TableCell align="right">{row.count}</TableCell>
-                                <TableCell align="right">{row.status}</TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                      </TableContainer>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Network library</Typography>
+                      <Stack spacing={2}>
+                        {networks.map((network) => (
+                          <Button
+                            key={network.id}
+                            variant={selectedNetwork === network.id ? 'contained' : 'outlined'}
+                            onClick={() => setSelectedNetwork(network.id)}
+                            sx={{ justifyContent: 'space-between', py: 1.5 }}
+                          >
+                            <Box textAlign="left">
+                              <Typography fontWeight={700}>{network.name}</Typography>
+                              <Typography variant="caption" color="text.secondary">{network.category}</Typography>
+                            </Box>
+                            <Chip label={network.status} color="success" variant="outlined" />
+                          </Button>
+                        ))}
+                      </Stack>
                     </Paper>
                   </Grid>
 
                   <Grid item xs={12} lg={4}>
                     <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                      <Typography variant="h6" sx={{ mb: 2 }}>Topology details</Typography>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Schema details</Typography>
                       <List>
-                        {preview?.components.map((name) => (
-                          <ListItem key={name} divider>
-                            <ListItemText primary={name} secondary="Available in network schema" />
+                        {summary?.components.map((item) => (
+                          <ListItem key={item} divider>
+                            <ListItemText primary={item} secondary="PyPSA component" />
                           </ListItem>
                         ))}
                       </List>
@@ -351,29 +385,41 @@ export default function App() {
                 </Grid>
               )}
 
-              {tab === 'optimization' && (
+              {tab === 'scenarios' && (
                 <Grid container spacing={3}>
                   <Grid item xs={12} lg={7}>
                     <Paper sx={{ p: 3, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
                       <Typography variant="h5" sx={{ mb: 3, fontWeight: 700 }}>Scenario configuration</Typography>
                       <Stack spacing={2}>
-                        <TextField
-                          label="Network name"
-                          value={networkName}
-                          onChange={(event) => setNetworkName(event.target.value)}
-                          fullWidth
-                        />
-                        <Select
-                          value={selectedMode}
-                          onChange={(event) => setSelectedMode(event.target.value)}
-                          fullWidth
-                        >
-                          {systemInfo?.modes.map((mode) => (
-                            <MenuItem key={mode} value={mode}>
-                              {mode.toUpperCase()}
-                            </MenuItem>
+                        <TextField label="Scenario name" value={scenarioName} onChange={(event) => setScenarioName(event.target.value)} fullWidth />
+
+                        <Select value={selectedNetwork} onChange={(event) => setSelectedNetwork(String(event.target.value))} fullWidth>
+                          {networks.map((network) => (
+                            <MenuItem key={network.id} value={network.id}>{network.name}</MenuItem>
                           ))}
                         </Select>
+
+                        <Select value={mode} onChange={(event) => setMode(String(event.target.value))} fullWidth>
+                          {systemInfo?.modes.map((item) => (
+                            <MenuItem key={item} value={item}>{item.toUpperCase()}</MenuItem>
+                          ))}
+                        </Select>
+
+                        <Select value={solver} onChange={(event) => setSolver(String(event.target.value))} fullWidth>
+                          {systemInfo?.solvers.map((item) => (
+                            <MenuItem key={item} value={item}>{item.toUpperCase()}</MenuItem>
+                          ))}
+                        </Select>
+
+                        <TextField
+                          label="Optimization horizon"
+                          type="number"
+                          value={horizon}
+                          onChange={(event) => setHorizon(Number(event.target.value) || 24)}
+                          inputProps={{ min: 1, max: 168 }}
+                          fullWidth
+                        />
+
                         <Button variant="contained" size="large" onClick={runScenario} disabled={running}>
                           {running ? 'Running scenario…' : 'Execute optimization'}
                         </Button>
@@ -383,11 +429,16 @@ export default function App() {
 
                   <Grid item xs={12} lg={5}>
                     <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                      <Typography variant="h6" sx={{ mb: 2 }}>Recommended actions</Typography>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Scenario actions</Typography>
                       <List>
-                        {operations.map((operation) => (
-                          <ListItem key={operation.id} divider>
-                            <ListItemText primary={operation.label} secondary={operation.status} />
+                        {[
+                          'Create baseline dispatch',
+                          'Review congestion points',
+                          'Compare renewable output',
+                          'Export report',
+                        ].map((text) => (
+                          <ListItem key={text} divider>
+                            <ListItemText primary={text} secondary="Prepared for execution" />
                           </ListItem>
                         ))}
                       </List>
@@ -433,7 +484,11 @@ export default function App() {
 
                   <Grid item xs={12}>
                     <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                      <Typography variant="h6" sx={{ mb: 2 }}>Result analysis</Typography>
+                      <Stack direction="row" spacing={2} justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                        <Typography variant="h6">Result analysis</Typography>
+                        <Button variant="outlined" onClick={exportResults} disabled={!result}>Export report</Button>
+                      </Stack>
+
                       {result ? (
                         <TableContainer>
                           <Table>
