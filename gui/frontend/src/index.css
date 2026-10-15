@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AppBar,
   Box,
@@ -9,11 +9,12 @@ import {
   Container,
   Divider,
   Grid,
-  IconButton,
   List,
   ListItem,
   ListItemText,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   Table,
   TableBody,
@@ -21,13 +22,26 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TextField,
   Toolbar,
   Typography,
 } from '@mui/material';
 import DashboardRoundedIcon from '@mui/icons-material/DashboardRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
+import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
+import AutoAwesomeMotionRoundedIcon from '@mui/icons-material/AutoAwesomeMotionRounded';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+
+type TabKey = 'overview' | 'network' | 'optimization' | 'results';
+
+type SystemInfo = {
+  name: string;
+  version: string;
+  pypsa_version: string;
+  features: string[];
+  modes: string[];
+};
 
 type NetworkPreview = {
   name: string;
@@ -40,13 +54,20 @@ type NetworkPreview = {
   components: string[];
   snapshots: number;
   supply: number;
+  demand: number;
+  status: string;
 };
 
-type SystemInfo = {
+type ComponentSummary = {
   name: string;
-  version: string;
-  pypsa_version: string;
-  features: string[];
+  count: number;
+  status: string;
+};
+
+type OperationAction = {
+  id: string;
+  label: string;
+  status: string;
 };
 
 type RunResult = {
@@ -62,40 +83,65 @@ type RunResult = {
   transformers: number;
   snapshot_count: number;
   highlights: Array<{ label: string; value: number }>;
+  summary: {
+    supply_ratio: number;
+    status: string;
+    solver: string;
+  };
 };
 
 const API_BASE = 'http://localhost:8000';
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${url}`);
+async function fetchJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`);
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
-  return response.json() as Promise<T>;
+  return (await response.json()) as T;
 }
 
 export default function App() {
+  const [tab, setTab] = useState<TabKey>('overview');
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [preview, setPreview] = useState<NetworkPreview | null>(null);
+  const [components, setComponents] = useState<ComponentSummary[]>([]);
+  const [operations, setOperations] = useState<OperationAction[]>([]);
   const [result, setResult] = useState<RunResult | null>(null);
   const [running, setRunning] = useState(false);
+  const [selectedMode, setSelectedMode] = useState('lopf');
+  const [networkName, setNetworkName] = useState('ac_dc_meshed');
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [info, network] = await Promise.all([
+        const [info, network, componentData, operationData] = await Promise.all([
           fetchJson<SystemInfo>('/api/system-info'),
           fetchJson<NetworkPreview>('/api/network-preview'),
+          fetchJson<{ summary: ComponentSummary[] }>('/api/component-summary'),
+          fetchJson<{ actions: OperationAction[] }>('/api/operations'),
         ]);
         setSystemInfo(info);
         setPreview(network);
+        setComponents(componentData.summary);
+        setOperations(operationData.actions);
       } catch (error) {
-        console.error('Failed to fetch system info', error);
+        console.error('Failed to load PyPSA Studio data', error);
       }
     };
 
     void load();
   }, []);
+
+  const scenarioChart = useMemo(
+    () => [
+      { name: 'Buses', value: preview?.buses ?? 0 },
+      { name: 'Lines', value: preview?.lines ?? 0 },
+      { name: 'Generators', value: preview?.generators ?? 0 },
+      { name: 'Loads', value: preview?.loads ?? 0 },
+      { name: 'Storage', value: preview?.storage_units ?? 0 },
+    ],
+    [preview],
+  );
 
   const runScenario = async () => {
     setRunning(true);
@@ -103,190 +149,317 @@ export default function App() {
       const response = await fetch(`${API_BASE}/api/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ network_name: 'ac_dc_meshed', mode: 'lopf' }),
+        body: JSON.stringify({ network_name: networkName, mode: selectedMode }),
       });
+
+      if (!response.ok) {
+        throw new Error(`Optimization request failed: ${response.status}`);
+      }
+
       const payload = (await response.json()) as RunResult;
       setResult(payload);
+      setTab('results');
     } catch (error) {
-      console.error('Failed to run optimization', error);
+      console.error('Failed to run scenario', error);
     } finally {
       setRunning(false);
     }
   };
 
-  const chartData = [
-    { name: 'Buses', value: preview?.buses ?? 0 },
-    { name: 'Lines', value: preview?.lines ?? 0 },
-    { name: 'Generators', value: preview?.generators ?? 0 },
-    { name: 'Loads', value: preview?.loads ?? 0 },
-    { name: 'Storage', value: preview?.storage_units ?? 0 },
-  ];
+  const navItems = [
+    { key: 'overview', label: 'Overview', icon: <DashboardRoundedIcon /> },
+    { key: 'network', label: 'Network', icon: <AutoAwesomeMotionRoundedIcon /> },
+    { key: 'optimization', label: 'Optimization', icon: <BoltRoundedIcon /> },
+    { key: 'results', label: 'Results', icon: <InsightsRoundedIcon /> },
+  ] as const;
 
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: '#091421', color: '#ecfeff' }}>
-      <AppBar position="sticky" sx={{ bgcolor: 'rgba(15,29,45,0.9)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(125,211,252,0.12)' }}>
+    <Box sx={{ minHeight: '100vh', bgcolor: '#07111f', color: '#f8fafc' }}>
+      <AppBar
+        position="sticky"
+        sx={{
+          bgcolor: 'rgba(15, 23, 42, 0.92)',
+          backdropFilter: 'blur(12px)',
+          borderBottom: '1px solid rgba(125, 211, 252, 0.14)',
+        }}
+      >
         <Toolbar>
           <BoltRoundedIcon sx={{ mr: 1.5, color: '#7dd3fc' }} />
-          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 700 }}>
+          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 800 }}>
             PyPSA Studio
           </Typography>
-          <Chip label={systemInfo ? `PyPSA ${systemInfo.pypsa_version}` : 'Loading…'} color="primary" variant="outlined" />
+          <Chip
+            label={systemInfo ? `PyPSA ${systemInfo.pypsa_version}` : 'Loading…'}
+            color="primary"
+            variant="outlined"
+          />
         </Toolbar>
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 4 }}>
         <Grid container spacing={3}>
-          <Grid item xs={12} md={2.2}>
-            <Paper sx={{ p: 2, bgcolor: '#0d1b2a', border: '1px solid rgba(125,211,252,0.12)' }}>
+          <Grid item xs={12} md={2.3}>
+            <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+              <Stack spacing={1.25}>
+                {navItems.map(({ key, label, icon }) => (
+                  <Button
+                    key={key}
+                    fullWidth
+                    variant={tab === key ? 'contained' : 'text'}
+                    startIcon={icon}
+                    onClick={() => setTab(key)}
+                    sx={{
+                      justifyContent: 'flex-start',
+                      color: tab === key ? '#06131d' : '#dbeafe',
+                      fontWeight: 700,
+                      py: 1.1,
+                    }}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </Stack>
+              <Divider sx={{ my: 2, borderColor: 'rgba(148,163,184,0.22)' }} />
               <Stack spacing={1}>
-                <Button fullWidth variant="contained" startIcon={<DashboardRoundedIcon />} sx={{ justifyContent: 'flex-start' }}>
-                  Dashboard
-                </Button>
-                <Button fullWidth variant="text" startIcon={<BoltRoundedIcon />} sx={{ justifyContent: 'flex-start', color: '#dbeafe' }}>
-                  Optimization
-                </Button>
-                <Button fullWidth variant="text" startIcon={<SettingsRoundedIcon />} sx={{ justifyContent: 'flex-start', color: '#dbeafe' }}>
-                  Settings
-                </Button>
+                <Typography variant="overline" color="text.secondary">Workspace</Typography>
+                <Chip label={preview?.status ?? 'Loading'} color="success" variant="outlined" />
+                <Chip label={networkName} variant="outlined" color="secondary" />
               </Stack>
             </Paper>
           </Grid>
 
-          <Grid item xs={12} md={9.8}>
+          <Grid item xs={12} md={9.7}>
             <Stack spacing={3}>
-              <Grid container spacing={3}>
-                <Grid item xs={12} md={3}>
-                  <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <CardContent>
-                      <Typography variant="overline" color="text.secondary">Network</Typography>
-                      <Typography variant="h4">{preview?.name ?? 'Loading'}</Typography>
-                      <Typography variant="body2" color="text.secondary">Sample scenario</Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <CardContent>
-                      <Typography variant="overline" color="text.secondary">Buses</Typography>
-                      <Typography variant="h4">{preview?.buses ?? 0}</Typography>
-                      <Typography variant="body2" color="text.secondary">Nodes in topology</Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <CardContent>
-                      <Typography variant="overline" color="text.secondary">Generation</Typography>
-                      <Typography variant="h4">{preview?.supply.toFixed(2) ?? '0.00'}</Typography>
-                      <Typography variant="body2" color="text.secondary">MW / total dispatch</Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-                <Grid item xs={12} md={3}>
-                  <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <CardContent>
-                      <Typography variant="overline" color="text.secondary">Snapshots</Typography>
-                      <Typography variant="h4">{preview?.snapshots ?? 0}</Typography>
-                      <Typography variant="body2" color="text.secondary">Time steps</Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-              </Grid>
-
-              <Paper sx={{ p: 3, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }} spacing={2}>
-                  <Box>
-                    <Typography variant="h5" sx={{ fontWeight: 700 }}>System operations</Typography>
-                    <Typography variant="body2" color="text.secondary">Run a PyPSA optimization scenario and inspect the results.</Typography>
-                  </Box>
-                  <Button variant="contained" size="large" onClick={runScenario} disabled={running}>
-                    {running ? 'Running scenario…' : 'Run LOPF'}
-                  </Button>
-                </Stack>
-              </Paper>
-
-              <Grid container spacing={3}>
-                <Grid item xs={12} lg={7}>
-                  <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <Typography variant="h6" sx={{ mb: 2 }}>Network composition</Typography>
-                    <Box sx={{ width: '100%', height: 260 }}>
-                      <ResponsiveContainer>
-                        <BarChart data={chartData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
-                          <XAxis dataKey="name" stroke="#cbd5e1" />
-                          <YAxis stroke="#cbd5e1" />
-                          <Tooltip />
-                          <Bar dataKey="value" fill="#7dd3fc" radius={[6, 6, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </Box>
-                  </Paper>
-                </Grid>
-
-                <Grid item xs={12} lg={5}>
-                  <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                    <Typography variant="h6" sx={{ mb: 2 }}>Components</Typography>
-                    <List>
-                      {preview?.components.map((name) => (
-                        <ListItem key={name} divider>
-                          <ListItemText primary={name} secondary="Available component" />
-                        </ListItem>
-                      ))}
-                    </List>
-                  </Paper>
-                </Grid>
-              </Grid>
-
-              <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                <Typography variant="h6" sx={{ mb: 2 }}>Results</Typography>
-                {result ? (
-                  <Grid container spacing={2}>
+              {tab === 'overview' && (
+                <>
+                  <Grid container spacing={3}>
                     <Grid item xs={12} md={3}>
-                      <Card sx={{ bgcolor: '#112132' }}><CardContent><Typography variant="overline">Objective</Typography><Typography variant="h5">{result.objective.toFixed(2)}</Typography></CardContent></Card>
+                      <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <CardContent>
+                          <Typography variant="overline" color="text.secondary">Network</Typography>
+                          <Typography variant="h4">{preview?.name ?? 'Loading'}</Typography>
+                          <Typography variant="body2" color="text.secondary">pypsa example model</Typography>
+                        </CardContent>
+                      </Card>
                     </Grid>
                     <Grid item xs={12} md={3}>
-                      <Card sx={{ bgcolor: '#112132' }}><CardContent><Typography variant="overline">Buses</Typography><Typography variant="h5">{result.buses}</Typography></CardContent></Card>
+                      <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <CardContent>
+                          <Typography variant="overline" color="text.secondary">Buses</Typography>
+                          <Typography variant="h4">{preview?.buses ?? 0}</Typography>
+                          <Typography variant="body2" color="text.secondary">Active nodes in system</Typography>
+                        </CardContent>
+                      </Card>
                     </Grid>
                     <Grid item xs={12} md={3}>
-                      <Card sx={{ bgcolor: '#112132' }}><CardContent><Typography variant="overline">Lines</Typography><Typography variant="h5">{result.lines}</Typography></CardContent></Card>
+                      <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <CardContent>
+                          <Typography variant="overline" color="text.secondary">Demand</Typography>
+                          <Typography variant="h4">{preview?.demand.toFixed(2) ?? '0.00'}</Typography>
+                          <Typography variant="body2" color="text.secondary">Load demand (MW)</Typography>
+                        </CardContent>
+                      </Card>
                     </Grid>
                     <Grid item xs={12} md={3}>
-                      <Card sx={{ bgcolor: '#112132' }}><CardContent><Typography variant="overline">Mode</Typography><Typography variant="h5">{result.mode}</Typography></CardContent></Card>
+                      <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <CardContent>
+                          <Typography variant="overline" color="text.secondary">Snapshots</Typography>
+                          <Typography variant="h4">{preview?.snapshots ?? 0}</Typography>
+                          <Typography variant="body2" color="text.secondary">Time horizon</Typography>
+                        </CardContent>
+                      </Card>
                     </Grid>
-                    <Grid item xs={12}>
+                  </Grid>
+
+                  <Grid container spacing={3}>
+                    <Grid item xs={12} lg={7}>
+                      <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <Typography variant="h6" sx={{ mb: 2 }}>System composition</Typography>
+                        <Box sx={{ width: '100%', height: 280 }}>
+                          <ResponsiveContainer>
+                            <BarChart data={scenarioChart}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                              <XAxis dataKey="name" stroke="#cbd5e1" />
+                              <YAxis stroke="#cbd5e1" />
+                              <Tooltip />
+                              <Bar dataKey="value" fill="#7dd3fc" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </Box>
+                      </Paper>
+                    </Grid>
+
+                    <Grid item xs={12} lg={5}>
+                      <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                        <Typography variant="h6" sx={{ mb: 2 }}>Available features</Typography>
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                          {systemInfo?.features.map((feature) => (
+                            <Chip
+                              key={feature}
+                              label={feature}
+                              variant="outlined"
+                              sx={{ borderColor: 'rgba(125,211,252,0.2)', color: '#dbeafe' }}
+                            />
+                          ))}
+                        </Stack>
+                      </Paper>
+                    </Grid>
+                  </Grid>
+                </>
+              )}
+
+              {tab === 'network' && (
+                <Grid container spacing={3}>
+                  <Grid item xs={12} lg={8}>
+                    <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Component overview</Typography>
                       <TableContainer>
                         <Table>
                           <TableHead>
                             <TableRow>
-                              <TableCell>Metric</TableCell>
-                              <TableCell align="right">Value</TableCell>
+                              <TableCell>Component</TableCell>
+                              <TableCell align="right">Count</TableCell>
+                              <TableCell align="right">Status</TableCell>
                             </TableRow>
                           </TableHead>
                           <TableBody>
-                            {result.highlights.map((row) => (
-                              <TableRow key={row.label}>
-                                <TableCell>{row.label}</TableCell>
-                                <TableCell align="right">{row.value}</TableCell>
+                            {components.map((row) => (
+                              <TableRow key={row.name}>
+                                <TableCell>{row.name}</TableCell>
+                                <TableCell align="right">{row.count}</TableCell>
+                                <TableCell align="right">{row.status}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>
                         </Table>
                       </TableContainer>
-                    </Grid>
+                    </Paper>
                   </Grid>
-                ) : (
-                  <Typography color="text.secondary">No optimization result yet. Run a scenario to generate analysis.</Typography>
-                )}
-              </Paper>
 
-              <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                <Typography variant="h6" sx={{ mb: 1 }}>Platform</Typography>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                  {systemInfo?.features.map((feature) => (
-                    <Chip key={feature} label={feature} variant="outlined" sx={{ borderColor: 'rgba(125,211,252,0.2)', color: '#dbeafe' }} />
-                  ))}
-                </Stack>
-              </Paper>
+                  <Grid item xs={12} lg={4}>
+                    <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Topology details</Typography>
+                      <List>
+                        {preview?.components.map((name) => (
+                          <ListItem key={name} divider>
+                            <ListItemText primary={name} secondary="Available in network schema" />
+                          </ListItem>
+                        ))}
+                      </List>
+                    </Paper>
+                  </Grid>
+                </Grid>
+              )}
+
+              {tab === 'optimization' && (
+                <Grid container spacing={3}>
+                  <Grid item xs={12} lg={7}>
+                    <Paper sx={{ p: 3, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <Typography variant="h5" sx={{ mb: 3, fontWeight: 700 }}>Scenario configuration</Typography>
+                      <Stack spacing={2}>
+                        <TextField
+                          label="Network name"
+                          value={networkName}
+                          onChange={(event) => setNetworkName(event.target.value)}
+                          fullWidth
+                        />
+                        <Select
+                          value={selectedMode}
+                          onChange={(event) => setSelectedMode(event.target.value)}
+                          fullWidth
+                        >
+                          {systemInfo?.modes.map((mode) => (
+                            <MenuItem key={mode} value={mode}>
+                              {mode.toUpperCase()}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                        <Button variant="contained" size="large" onClick={runScenario} disabled={running}>
+                          {running ? 'Running scenario…' : 'Execute optimization'}
+                        </Button>
+                      </Stack>
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12} lg={5}>
+                    <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Recommended actions</Typography>
+                      <List>
+                        {operations.map((operation) => (
+                          <ListItem key={operation.id} divider>
+                            <ListItemText primary={operation.label} secondary={operation.status} />
+                          </ListItem>
+                        ))}
+                      </List>
+                    </Paper>
+                  </Grid>
+                </Grid>
+              )}
+
+              {tab === 'results' && (
+                <Grid container spacing={3}>
+                  <Grid item xs={12} md={3}>
+                    <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <CardContent>
+                        <Typography variant="overline" color="text.secondary">Objective</Typography>
+                        <Typography variant="h4">{result ? result.objective.toFixed(2) : '—'}</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={3}>
+                    <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <CardContent>
+                        <Typography variant="overline" color="text.secondary">Supply ratio</Typography>
+                        <Typography variant="h4">{result ? result.summary.supply_ratio.toFixed(2) : '—'}</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={3}>
+                    <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <CardContent>
+                        <Typography variant="overline" color="text.secondary">Solver</Typography>
+                        <Typography variant="h4">{result ? result.summary.solver : '—'}</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                  <Grid item xs={12} md={3}>
+                    <Card sx={{ bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <CardContent>
+                        <Typography variant="overline" color="text.secondary">Status</Typography>
+                        <Typography variant="h4">{result ? result.summary.status : 'No run'}</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Result analysis</Typography>
+                      {result ? (
+                        <TableContainer>
+                          <Table>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>Metric</TableCell>
+                                <TableCell align="right">Value</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {result.highlights.map((row) => (
+                                <TableRow key={row.label}>
+                                  <TableCell>{row.label}</TableCell>
+                                  <TableCell align="right">{row.value}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      ) : (
+                        <Typography color="text.secondary">No optimization result available yet.</Typography>
+                      )}
+                    </Paper>
+                  </Grid>
+                </Grid>
+              )}
             </Stack>
           </Grid>
         </Grid>
@@ -294,4 +467,3 @@ export default function App() {
     </Box>
   );
 }
-
