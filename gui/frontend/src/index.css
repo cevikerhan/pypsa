@@ -31,6 +31,7 @@ import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
 import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded';
+import SaveRoundedIcon from '@mui/icons-material/SaveRounded';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 type TabKey = 'overview' | 'network' | 'scenarios' | 'results';
@@ -73,6 +74,16 @@ type ComponentMeta = {
   name: string;
   count: number;
   status: string;
+};
+
+type ScenarioRecord = {
+  id: number;
+  name: string;
+  network_name: string;
+  mode: string;
+  solver: string;
+  horizon: number;
+  created_at: string;
 };
 
 type RunResult = {
@@ -119,6 +130,7 @@ export default function App() {
   const [tab, setTab] = useState<TabKey>('overview');
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [networks, setNetworks] = useState<ExampleNetwork[]>([]);
+  const [scenarios, setScenarios] = useState<ScenarioRecord[]>([]);
   const [selectedNetwork, setSelectedNetwork] = useState('ac_dc_meshed');
   const [summary, setSummary] = useState<NetworkSummary | null>(null);
   const [components, setComponents] = useState<ComponentMeta[]>([]);
@@ -132,15 +144,18 @@ export default function App() {
 
   const loadData = async () => {
     try {
-      const [info, exampleData, componentData] = await Promise.all([
+      const [info, exampleData, componentData, scenarioData] = await Promise.all([
         fetchJson<SystemInfo>('/api/system-info'),
         fetchJson<{ networks: ExampleNetwork[] }>('/api/example-networks'),
         fetchJson<{ summary: ComponentMeta[] }>('/api/component-summary'),
+        fetchJson<{ scenarios: ScenarioRecord[] }>('/api/scenarios'),
       ]);
 
       setSystemInfo(info);
       setNetworks(exampleData.networks);
       setComponents(componentData.summary);
+      setScenarios(scenarioData.scenarios);
+
       const networkSummary = await fetchJson<NetworkSummary>(`/api/network-summary?network=${selectedNetwork}`);
       setSummary(networkSummary);
     } catch (error) {
@@ -176,6 +191,32 @@ export default function App() {
     [summary],
   );
 
+  const saveScenario = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/scenarios`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: scenarioName || 'New scenario',
+          network_name: selectedNetwork,
+          mode,
+          solver,
+          horizon,
+          metadata: {
+            selectedNetwork,
+            generatedAt: new Date().toISOString(),
+          },
+        }),
+      });
+
+      if (response.ok) {
+        await loadData();
+      }
+    } catch (error) {
+      console.error('Scenario save failed', error);
+    }
+  };
+
   const runScenario = async () => {
     setRunning(true);
     try {
@@ -205,12 +246,26 @@ export default function App() {
     }
   };
 
-  const handleUpload = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      setUploadName(file.name);
-      setScenarioName(file.name.replace(/\.[^/.]+$/, ''));
-      setSelectedNetwork('ac_dc_meshed');
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (response.ok) {
+        const payload = (await response.json()) as { filename: string };
+        setUploadName(payload.filename);
+        setScenarioName(payload.filename.replace(/\.[^/.]+$/, ''));
+      }
+    } catch (error) {
+      console.error('Upload failed', error);
     }
   };
 
@@ -420,27 +475,34 @@ export default function App() {
                           fullWidth
                         />
 
-                        <Button variant="contained" size="large" onClick={runScenario} disabled={running}>
-                          {running ? 'Running scenario…' : 'Execute optimization'}
-                        </Button>
+                        <Stack direction="row" spacing={2}>
+                          <Button variant="contained" size="large" onClick={runScenario} disabled={running}>
+                            {running ? 'Running scenario…' : 'Execute optimization'}
+                          </Button>
+                          <Button variant="outlined" size="large" startIcon={<SaveRoundedIcon />} onClick={saveScenario}>
+                            Save scenario
+                          </Button>
+                        </Stack>
                       </Stack>
                     </Paper>
                   </Grid>
 
                   <Grid item xs={12} lg={5}>
                     <Paper sx={{ p: 2, bgcolor: '#0f1d2d', border: '1px solid rgba(125,211,252,0.12)' }}>
-                      <Typography variant="h6" sx={{ mb: 2 }}>Scenario actions</Typography>
+                      <Typography variant="h6" sx={{ mb: 2 }}>Saved scenarios</Typography>
                       <List>
-                        {[
-                          'Create baseline dispatch',
-                          'Review congestion points',
-                          'Compare renewable output',
-                          'Export report',
-                        ].map((text) => (
-                          <ListItem key={text} divider>
-                            <ListItemText primary={text} secondary="Prepared for execution" />
+                        {scenarios.length > 0 ? scenarios.map((scenario) => (
+                          <ListItem key={scenario.id} divider>
+                            <ListItemText
+                              primary={scenario.name}
+                              secondary={`${scenario.network_name} • ${scenario.mode.toUpperCase()} • ${scenario.solver.toUpperCase()}`}
+                            />
                           </ListItem>
-                        ))}
+                        )) : (
+                          <ListItem>
+                            <ListItemText primary="No saved scenarios yet" secondary="Create one to compare runs." />
+                          </ListItem>
+                        )}
                       </List>
                     </Paper>
                   </Grid>

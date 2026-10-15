@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pypsa
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+import storage
 
 app = FastAPI(
     title="PyPSA Studio",
     description="Professional GUI backend for PyPSA workflows",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 app.add_middleware(
@@ -35,6 +38,20 @@ class OptimizationRequest(BaseModel):
     scenario_name: str = Field(default="Baseline network")
 
 
+class ScenarioRequest(BaseModel):
+    name: str = Field(default="Scenario")
+    network_name: str = Field(default="ac_dc_meshed")
+    mode: str = Field(default="lopf")
+    solver: str = Field(default="highs")
+    horizon: int = Field(default=24)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    storage.init_db()
+
+
 def get_example_network(name: str) -> pypsa.Network:
     """Return a supported example network for the UI."""
 
@@ -56,7 +73,7 @@ async def health() -> dict[str, Any]:
 async def system_info() -> dict[str, Any]:
     return {
         "name": "PyPSA Studio",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "pypsa_version": pypsa.__version__,
         "features": [
             "Power flow",
@@ -68,6 +85,7 @@ async def system_info() -> dict[str, Any]:
             "Optimization workflow orchestration",
             "Scenario comparison",
             "Results export",
+            "Network upload & persistence",
         ],
         "modes": ["pf", "lpf", "lopf"],
         "solvers": SUPPORTED_SOLVERS,
@@ -155,6 +173,51 @@ async def operations() -> dict[str, Any]:
             "Inspect network bottlenecks",
             "Review generator dispatch and losses",
         ],
+    }
+
+
+@app.get("/api/scenarios")
+async def scenarios() -> dict[str, Any]:
+    return {"scenarios": storage.list_scenarios()}
+
+
+@app.post("/api/scenarios")
+async def create_scenario(payload: ScenarioRequest) -> dict[str, Any]:
+    scenario_id = storage.save_scenario(
+        {
+            "name": payload.name,
+            "network_name": payload.network_name,
+            "mode": payload.mode,
+            "solver": payload.solver,
+            "horizon": payload.horizon,
+            "metadata": payload.metadata,
+        }
+    )
+    return {"id": scenario_id, "status": "created"}
+
+
+@app.post("/api/upload")
+async def upload_network(file: UploadFile = File(...)) -> dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    upload_dir = Path(__file__).resolve().parent / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename).suffix or ".nc"
+    safe_name = f"uploaded_{len(list(upload_dir.iterdir())) + 1}{suffix}"
+    dest = upload_dir / safe_name
+
+    with dest.open("wb") as handle:
+        while chunk := await file.read(8192):
+            handle.write(chunk)
+
+    record_id = storage.save_uploaded_network(file.filename, str(dest), {"uploaded": True})
+    return {
+        "id": record_id,
+        "filename": file.filename,
+        "stored_name": safe_name,
+        "path": str(dest),
+        "status": "uploaded",
     }
 
 

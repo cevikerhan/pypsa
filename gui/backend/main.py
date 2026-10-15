@@ -1,115 +1,113 @@
-from __future__ import annotations
-
+import json
+import sqlite3
+from pathlib import Path
 from typing import Any
 
-import pypsa
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-
-app = FastAPI(
-    title="PyPSA Studio",
-    description="Professional GUI backend for PyPSA workflows",
-    version="0.1.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+DB_PATH = Path(__file__).resolve().parent / "pypsa_studio.db"
+UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
 
 
-class OptimizationRequest(BaseModel):
-    """Parameters used to run a PyPSA optimization job."""
+def init_db() -> None:
+    """Initialize local SQLite storage for scenarios and uploaded files."""
 
-    network_name: str = Field(default="ac_dc_meshed")
-    mode: str = Field(default="lopf", description="Optimization mode: lpf, lopf, or pf")
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-
-@app.get("/api/health")
-async def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "pypsa_version": pypsa.__version__,
-        "app": "PyPSA Studio",
-    }
-
-
-@app.get("/api/system-info")
-async def system_info() -> dict[str, Any]:
-    return {
-        "name": "PyPSA Studio",
-        "version": "0.1.0",
-        "pypsa_version": pypsa.__version__,
-        "features": [
-            "Power flow",
-            "Linear optimal power flow",
-            "Static network analysis",
-            "Scenario review",
-            "Network planning",
-            "Results dashboard",
-        ],
-    }
-
-
-@app.get("/api/network-preview")
-async def network_preview() -> dict[str, Any]:
-    network = pypsa.examples.ac_dc_meshed()
-    return {
-        "name": "ac_dc_meshed",
-        "buses": len(network.buses),
-        "lines": len(network.lines),
-        "generators": len(network.generators),
-        "loads": len(network.loads),
-        "storage_units": len(network.storage_units),
-        "transformers": len(network.transformers),
-        "components": list(network.components.keys())[:12],
-        "snapshots": len(network.snapshots),
-        "supply": float(network.generators_t.p.sum().sum()) if hasattr(network, "generators_t") else 0.0,
-    }
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scenarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                network_name TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                solver TEXT NOT NULL,
+                horizon INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS networks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                file_path TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
-@app.post("/api/run")
-async def run_optimization(payload: OptimizationRequest) -> dict[str, Any]:
-    if payload.network_name == "ac_dc_meshed":
-        network = pypsa.examples.ac_dc_meshed()
-    else:
-        network = pypsa.Network()
+def save_scenario(payload: dict[str, Any]) -> int:
+    """Persist a scenario in the local database."""
 
-    if payload.mode == "lopf":
-        network.optimize.create_model()
-        network.optimize.solve_model()
-    elif payload.mode == "pf":
-        network.lpf()
-    else:
-        network.lpf()
-
-    objective_value = float(getattr(network, "objective", 0.0) or 0.0)
-
-    return {
-        "status": "success",
-        "mode": payload.mode,
-        "network": payload.network_name,
-        "objective": objective_value,
-        "buses": len(network.buses),
-        "lines": len(network.lines),
-        "generators": len(network.generators),
-        "loads": len(network.loads),
-        "storage_units": len(network.storage_units),
-        "transformers": len(network.transformers),
-        "snapshot_count": len(network.snapshots),
-        "highlights": [
-            {"label": "Load", "value": round(float(network.loads_t.p.sum().sum()), 2)},
-            {"label": "Generation", "value": round(float(network.generators_t.p.sum().sum()), 2)},
-            {"label": "Objective", "value": round(objective_value, 4)},
-        ],
-    }
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO scenarios (name, network_name, mode, solver, horizon, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("name") or "Untitled scenario",
+                payload.get("network_name") or "ac_dc_meshed",
+                payload.get("mode") or "lopf",
+                payload.get("solver") or "highs",
+                int(payload.get("horizon") or 24),
+                json.dumps(payload.get("metadata") or {}),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
 
 
-if __name__ == "__main__":
-    import uvicorn
+def list_scenarios() -> list[dict[str, Any]]:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, name, network_name, mode, solver, horizon, created_at
+            FROM scenarios
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return [
+        {
+            "id": row[0],
+            "name": row[1],
+            "network_name": row[2],
+            "mode": row[3],
+            "solver": row[4],
+            "horizon": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
+
+def save_uploaded_network(filename: str, file_path: str, metadata: dict[str, Any] | None = None) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO networks (name, file_path, metadata)
+            VALUES (?, ?, ?)
+            """,
+            (filename, file_path, json.dumps(metadata or {})),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
